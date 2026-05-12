@@ -2,18 +2,32 @@ import json
 import re
 import os
 import time
+import threading
 from datetime import datetime, timedelta
 import telebot
 from telebot import types
+from flask import Flask, request
 
 # ---------- НАСТРОЙКИ ----------
-TOKEN = os.getenv("BOT_TOKEN")  # Токен бота, передаётся через переменную окружения
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("Токен не найден! Укажите BOT_TOKEN в переменных окружения.")
 bot = telebot.TeleBot(TOKEN)
+
+# Веб-сервер для «пингера»
+app = Flask(__name__)
+
+@app.route('/ping')
+def ping():
+    return "OK", 200
+
+@app.route('/')
+def home():
+    return "Bot is running."
 
 # ---------- ХРАНИЛИЩЕ ДАННЫХ ----------
 DATA_FILE = "chats_data.json"
 
-# Структура: { chat_id (str): { "settings": {...}, "words": [...], "users": {...}, "init": bool } }
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -39,7 +53,6 @@ RANKS = {
 RANK_ORDER = ["$", "*", "**", "***", "****", "#"]
 RANK_NAMES = ["участник", "младший модератор", "старший модератор", "младший администратор", "старший администратор", "создатель"]
 
-# Варианты прав назначения
 RIGHT_OPTIONS = {
     1: ("#", "мунс"),
     2: ("****", "мсу"),
@@ -51,10 +64,8 @@ RIGHT_OPTIONS = {
     8: ("*", "мсу"),
 }
 
-# Часовые пояса для меню
 UTC_OFFSETS = [str(i) for i in range(-11, 13)]
 
-# Словарь нормализации для фильтра слов
 NORMALIZE_DICT = {
     'а': ['а', 'a', '@'],
     'б': ['б', 'b', '6'],
@@ -92,7 +103,6 @@ NORMALIZE_DICT = {
 }
 
 def normalize_text(text):
-    """Приводит текст к нижнему регистру и заменяет символы на канонические."""
     text = text.lower()
     result = []
     for char in text:
@@ -105,11 +115,9 @@ def normalize_text(text):
     return ''.join(result)
 
 def build_pattern(word):
-    """Создаёт регулярное выражение для поиска слова с учётом замен."""
     pattern_parts = []
     for canon_char in word:
         variants = NORMALIZE_DICT.get(canon_char, [canon_char])
-        # Экранируем специальные символы
         escaped = [re.escape(v) for v in variants]
         pattern_parts.append('[' + ''.join(escaped) + ']')
     return ''.join(pattern_parts)
@@ -119,14 +127,12 @@ def get_chat_id(message):
     return str(message.chat.id)
 
 def get_user_rank(chat_id, user_id):
-    """Возвращает ранг пользователя в чате (по умолчанию '$')."""
     chat = chats.get(chat_id, {})
     users = chat.get("users", {})
     user_data = users.get(str(user_id), {})
     return user_data.get("rank", "$")
 
 def get_chat_creator_id(chat_id, from_api=False):
-    """Возвращает Telegram user_id создателя чата. При from_api=True делает запрос к API."""
     if from_api:
         try:
             admins = bot.get_chat_administrators(chat_id)
@@ -135,7 +141,6 @@ def get_chat_creator_id(chat_id, from_api=False):
                     return str(admin.user.id)
         except:
             return None
-    # Ищем в данных бота
     chat = chats.get(chat_id, {})
     users = chat.get("users", {})
     for uid, data in users.items():
@@ -144,17 +149,14 @@ def get_chat_creator_id(chat_id, from_api=False):
     return None
 
 def update_creator(chat_id):
-    """Обновляет создателя чата по данным Telegram (при смене владельца)."""
     api_creator = get_chat_creator_id(chat_id, from_api=True)
     if not api_creator:
         return
     chat_data = chats.setdefault(chat_id, {"settings": get_default_settings(), "words": [], "users": {}, "init": False})
     users = chat_data.setdefault("users", {})
-    # Находим текущего создателя в данных и меняем на ****, если это не тот же
     for uid, data in users.items():
         if data.get("rank") == "#" and uid != api_creator:
             data["rank"] = "****"
-    # Назначаем api_creator создателем
     if api_creator not in users:
         users[api_creator] = {"rank": "#", "warns": 0, "blocked_until": None, "msg_total": 0, "msg_last_30d": 0, "msg_last_7d": 0, "last_msg_date": ""}
     else:
@@ -163,24 +165,21 @@ def update_creator(chat_id):
 
 def get_default_settings():
     return {
-        "updown_rights": "1",          # Вариант прав
-        "list_word_access": "***",     # $ или ***
-        "filter_mode": "off",          # off, only_del, only_warn, del_warn
+        "updown_rights": "1",
+        "list_word_access": "***",
+        "filter_mode": "off",
         "timezone": "+3",
-        "search_mode": "substring",    # substring или exact
-        "anonymous": "off"             # on/off
+        "search_mode": "substring",
+        "anonymous": "off"
     }
 
 def is_group_admin(bot_member):
-    """Проверяет, что бот является администратором с нужными правами."""
     if not bot_member or bot_member.status not in ["administrator", "creator"]:
         return False
-    # Проверяем ключевые права
     return (bot_member.can_restrict_members and
             bot_member.can_delete_messages)
 
 def check_bot_rights(chat_id, message=None):
-    """Проверяет, что бот имеет права администратора. Возвращает True, если всё в порядке."""
     try:
         bot_member = bot.get_chat_member(chat_id, bot.get_me().id)
         if not is_group_admin(bot_member):
@@ -195,7 +194,6 @@ def check_bot_rights(chat_id, message=None):
 
 # ---------- ОБЩИЕ ПРОВЕРКИ ДЛЯ КОМАНД ----------
 def require_group(func):
-    """Декоратор, разрешающий команду только в группах."""
     def wrapper(message):
         if message.chat.type not in ["group", "supergroup"]:
             bot.reply_to(message, "Ошибка: команда применяется в группах")
@@ -204,7 +202,6 @@ def require_group(func):
     return wrapper
 
 def require_private(func):
-    """Декоратор, разрешающий команду только в ЛС."""
     def wrapper(message):
         if message.chat.type != "private":
             bot.reply_to(message, "Ошибка: команда применяется в личных сообщениях боту")
@@ -213,40 +210,25 @@ def require_private(func):
     return wrapper
 
 def extract_username(message):
-    """Извлекает username из команды (reply или аргумент)."""
-    # Если ответ на сообщение
     if message.reply_to_message:
         return message.reply_to_message.from_user.username or "", message.reply_to_message.from_user.id
-    # Иначе разбираем текст команды
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         return None, None
     username = parts[1].strip().lstrip('@')
-    # Убираем возможные лишние пробелы после ника
     username = username.split()[0]
     return username, None
 
 def get_user_id_by_username(chat_id, username):
-    """По username пытается найти user_id в чате. Возвращает (user_id, username) или None."""
     if not username:
         return None
-    # Проверяем сохранённых пользователей (может быть несколько, берём любого)
-    chat = chats.get(chat_id)
-    if chat:
-        for uid, data in chat.get("users", {}).items():
-            # Ищем username в данных (можно хранить, но мы не храним username, поэтому ищем через API)
-            pass
-    # Лучше искать через API: получаем всех участников чата? Это дорого. Вместо этого будем получать сообщение и проверять отправителя.
-    # Для простоты будем требовать reply или точный username в команде, а разрешение username -> id через get_chat_member
     try:
-        # Пытаемся получить информацию о пользователе в чате
         member = bot.get_chat_member(chat_id, "@" + username)
         return str(member.user.id), username
     except:
         return None, None
 
 # ---------- ОБРАБОТКА КОМАНД (ГРУППЫ) ----------
-
 @bot.message_handler(commands=['start'])
 @require_private
 def start_private(message):
@@ -259,17 +241,12 @@ def start_private(message):
 @require_group
 def help_command(message):
     chat_id = get_chat_id(message)
-    # Получаем настройки для динамических значков
     settings = chats.get(chat_id, {}).get("settings", get_default_settings())
     updown_variant = settings.get("updown_rights", "1")
-    up_icon = "#"  # по умолчанию
-    down_icon = "#"
-    # Определяем ранг, с которого доступны up/down
+    up_icon = "#"
     min_rank_for_up = RIGHT_OPTIONS.get(int(updown_variant), ("#",))[0]
-    # Значок для list_word
     list_word_icon = settings.get("list_word_access", "***")
 
-    # Сокращённый список
     short_text = (
         "**Список команд**\n"
         "/help список команд\n"
@@ -295,7 +272,6 @@ def help_command(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("help_"))
 def help_callback(call):
     chat_id = str(call.message.chat.id)
-    # Проверка, что нажал тот, кто вызвал команду
     if call.from_user.id != call.message.reply_to_message.from_user.id:
         bot.answer_callback_query(call.id, text=f"Взаимодействовать с этим сообщением может только @{call.message.reply_to_message.from_user.username or call.message.reply_to_message.from_user.first_name}", show_alert=True)
         return
@@ -303,7 +279,7 @@ def help_callback(call):
     settings = chats.get(chat_id, {}).get("settings", get_default_settings())
     updown_variant = settings.get("updown_rights", "1")
     up_icon = RIGHT_OPTIONS.get(int(updown_variant), ("#",))[0]
-    down_icon = up_icon  # для down тот же минимальный ранг
+    down_icon = up_icon
     list_word_icon = settings.get("list_word_access", "***")
 
     if call.data == "help_expand":
@@ -362,17 +338,14 @@ def user_command(message):
     chat_id = get_chat_id(message)
     if not check_bot_rights(chat_id, message):
         return
-    # Получаем цель
     if message.reply_to_message:
         target = message.reply_to_message.from_user
         target_id = str(target.id)
         target_name = f"@{target.username}" if target.username else target.first_name
     elif len(message.text.split()) > 1:
         username_part = message.text.split()[1].lstrip('@')
-        # Ищем пользователя
         target_id = None
         target_name = f"@{username_part}"
-        # Пытаемся получить через API
         try:
             member = bot.get_chat_member(chat_id, "@" + username_part)
             target_id = str(member.user.id)
@@ -388,7 +361,6 @@ def user_command(message):
 
     user_data = chats.get(chat_id, {}).get("users", {}).get(target_id, {})
     if not user_data:
-        # Если данных нет, показываем пустую статистику
         user_data = {"rank": "$", "warns": 0, "blocked_until": None, "msg_total": 0, "msg_last_30d": 0, "msg_last_7d": 0}
 
     rank = user_data.get("rank", "$")
@@ -398,7 +370,6 @@ def user_command(message):
     msg_30d = user_data.get("msg_last_30d", 0)
     msg_7d = user_data.get("msg_last_7d", 0)
 
-    # Форматирование
     lines = [f"**Статистика пользователя {target_name}**"]
     lines.append(f"• Ранг: {RANKS.get(rank, 'участник')}")
     if warns > 0:
@@ -406,17 +377,14 @@ def user_command(message):
     else:
         lines.append("• Варны отсутствуют")
     if blocked_until:
-        # Преобразуем к локальному времени с учётом часового пояса
         tz_str = chats.get(chat_id, {}).get("settings", {}).get("timezone", "+3")
         offset_hours = int(tz_str.replace("UTC", "")) if "UTC" in tz_str else int(tz_str)
-        local_tz = timezone(timedelta(hours=offset_hours))
         utc_time = datetime.utcfromtimestamp(blocked_until)
         local_time = utc_time + timedelta(hours=offset_hours)
         time_str = local_time.strftime('%d.%m.%y %H:%M')
         lines.append(f"• Заблокирован до {time_str}")
     else:
         lines.append("• Блокировки отсутствуют")
-    # Сообщения
     if msg_total == 0:
         lines.append("• Сообщения отсутствуют")
     else:
@@ -491,7 +459,6 @@ def ranks_command(message):
     for uid, data in users.items():
         rank = data.get("rank", "$")
         if rank in rank_lists:
-            # Получаем username
             try:
                 member = bot.get_chat_member(chat_id, uid)
                 uname = f"@{member.user.username}" if member.user.username else member.user.first_name
@@ -499,7 +466,6 @@ def ranks_command(message):
                 uname = f"id{uid}"
             rank_lists[rank].append(uname)
 
-    # Сортируем по алфавиту
     for rank in rank_lists:
         rank_lists[rank].sort()
 
@@ -524,7 +490,6 @@ def up_command(message):
     chat_id = get_chat_id(message)
     if not check_bot_rights(chat_id, message):
         return
-    # Проверка прав вызывающего
     caller_id = str(message.from_user.id)
     caller_rank = get_user_rank(chat_id, caller_id)
     settings = chats.get(chat_id, {}).get("settings", get_default_settings())
@@ -534,13 +499,10 @@ def up_command(message):
         bot.reply_to(message, "Ошибка: недостаточно прав")
         return
 
-    # Получаем цель
     target_id, target_uname = extract_username(message)
     if target_id:
-        # из reply
         target_username = f"@{message.reply_to_message.from_user.username}" if message.reply_to_message.from_user.username else message.reply_to_message.from_user.first_name
     else:
-        # ищем по username
         target_id, target_uname = get_user_id_by_username(chat_id, target_uname)
         if not target_id:
             bot.reply_to(message, "Ошибка: пользователь не найден")
@@ -559,20 +521,17 @@ def up_command(message):
         bot.reply_to(message, "Ошибка: пользователь уже является создателем")
         return
 
-    # Проверка ограничений
     if restriction == "мунс":
         max_rank_index = RANK_ORDER.index(caller_rank) - 1
-    else:  # мсу
+    else:
         max_rank_index = RANK_ORDER.index(caller_rank)
 
     if RANK_ORDER.index(target_rank) >= max_rank_index:
         bot.reply_to(message, "Ошибка: недостаточно прав")
         return
 
-    # Повышаем
     new_rank_index = RANK_ORDER.index(target_rank) + 1
     new_rank = RANK_ORDER[new_rank_index]
-    # Обновляем данные
     chat_data = chats.setdefault(chat_id, {"settings": get_default_settings(), "words": [], "users": {}, "init": False})
     user_data = chat_data["users"].setdefault(target_id, {"rank": "$", "warns": 0, "blocked_until": None, "msg_total": 0, "msg_last_30d": 0, "msg_last_7d": 0})
     user_data["rank"] = new_rank
@@ -616,12 +575,10 @@ def down_command(message):
         bot.reply_to(message, "Ошибка: нельзя понизить создателя")
         return
 
-    # Проверка, не равны ли они (понижать равных нельзя в любом случае)
     if target_rank == caller_rank:
         bot.reply_to(message, "Ошибка: нельзя применить команду к себе")
         return
 
-    # Понижаем
     new_rank_index = RANK_ORDER.index(target_rank) - 1
     new_rank = RANK_ORDER[new_rank_index]
     chat_data = chats.setdefault(chat_id, {"settings": get_default_settings(), "words": [], "users": {}, "init": False})
@@ -704,7 +661,6 @@ def del_warn_command(message):
 @bot.message_handler(commands=['del_all_warn'])
 @require_group
 def del_all_warn_command(message):
-    # Аналогично, сбрасываем счётчик
     chat_id = get_chat_id(message)
     if not check_bot_rights(chat_id, message):
         return
@@ -740,19 +696,14 @@ def del_all_warn_command(message):
 
 # ---------- БЛОКИРОВКИ ----------
 def parse_block_time(time_str, timezone_offset):
-    """Парсит строку ДД.ММ.ГГ ЧЧ.ММ в Unix timestamp с учётом часового пояса."""
     try:
         dt = datetime.strptime(time_str, '%d.%m.%y %H.%M')
-        # Переводим в UTC
         utc_dt = dt - timedelta(hours=timezone_offset)
-        # Проверяем, что дата не в прошлом
         now_utc = datetime.utcnow()
         if utc_dt <= now_utc:
             return None, "Ошибка: дата в прошлом"
-        # Проверяем минимальный срок (5 минут)
         if (utc_dt - now_utc).total_seconds() < 300:
             return None, "Ошибка: указанный срок менее 5 минут"
-        # Проверяем максимальный срок (730 дней)
         max_date = now_utc + timedelta(days=730)
         if utc_dt > max_date:
             return None, "Ошибка: указанный срок более 730 дней"
@@ -772,7 +723,6 @@ def block_command(message):
         bot.reply_to(message, "Ошибка: недостаточно прав")
         return
 
-    # Разбираем аргументы: /block <ник> <время>
     parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         bot.reply_to(message, "Ошибка: неверный формат сообщения")
@@ -781,7 +731,6 @@ def block_command(message):
     time_part = parts[2]
 
     target_id, target_uname = None, target_part
-    # Ищем пользователя по username
     try:
         member = bot.get_chat_member(chat_id, "@" + target_part)
         target_id = str(member.user.id)
@@ -797,7 +746,6 @@ def block_command(message):
         bot.reply_to(message, "Ошибка: нельзя применить команду к боту")
         return
 
-    # Парсим время
     tz_str = chats.get(chat_id, {}).get("settings", {}).get("timezone", "+3")
     offset = int(tz_str.replace("UTC", "")) if "UTC" in tz_str else int(tz_str)
     timestamp, error = parse_block_time(time_part, offset)
@@ -805,21 +753,18 @@ def block_command(message):
         bot.reply_to(message, error)
         return
 
-    # Блокируем
     try:
         bot.restrict_chat_member(chat_id, int(target_id), until_date=timestamp, can_send_messages=False)
     except Exception as e:
         bot.reply_to(message, "Ошибка: у бота недостаточно прав")
         return
 
-    # Обновляем данные
     chat_data = chats.setdefault(chat_id, {"settings": get_default_settings(), "words": [], "users": {}, "init": False})
     user_data = chat_data["users"].setdefault(target_id, {"rank": "$", "warns": 0, "blocked_until": None, "msg_total": 0, "msg_last_30d": 0, "msg_last_7d": 0})
     old_block = user_data.get("blocked_until")
     user_data["blocked_until"] = timestamp
     save_data(chats)
 
-    # Формируем ответ
     local_dt = datetime.utcfromtimestamp(timestamp) + timedelta(hours=offset)
     time_str = local_dt.strftime('%d.%m.%y %H:%M')
     if old_block and old_block > time.time():
@@ -871,7 +816,6 @@ def del_block_command(message):
         bot.reply_to(message, "Ошибка: пользователь не заблокирован")
         return
 
-    # Разблокируем
     try:
         bot.restrict_chat_member(chat_id, int(target_id), can_send_messages=True, can_send_media_messages=True,
                                  can_send_other_messages=True, can_add_web_page_previews=True)
@@ -899,7 +843,6 @@ def list_word_command(message):
 
     words = chats.get(chat_id, {}).get("words", [])
     page = 1
-    # Пагинация
     items_per_page = 32
     total_pages = max(1, (len(words) + items_per_page - 1) // items_per_page) if words else 1
     start = (page - 1) * items_per_page
@@ -915,8 +858,7 @@ def list_word_command(message):
 
     keyboard = types.InlineKeyboardMarkup()
     if total_pages > 1:
-        # первая страница - только >
-        if page == 1 and total_pages > 1:
+        if page == 1:
             keyboard.add(types.InlineKeyboardButton(">", callback_data=f"listword_{chat_id}_{page + 1}"))
         elif page == total_pages:
             keyboard.add(types.InlineKeyboardButton("<", callback_data=f"listword_{chat_id}_{page - 1}"))
@@ -927,7 +869,6 @@ def list_word_command(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("listword_"))
 def list_word_callback(call):
-    # Проверяем, что нажал автор команды
     if call.from_user.id != call.message.reply_to_message.from_user.id:
         bot.answer_callback_query(call.id, text=f"Взаимодействовать с этим сообщением может только @{call.message.reply_to_message.from_user.username or call.message.reply_to_message.from_user.first_name}", show_alert=True)
         return
@@ -973,7 +914,6 @@ def add_word_command(message):
         bot.reply_to(message, "Ошибка: недостаточно прав")
         return
 
-    # Слова после команды, разделённые новой строкой
     lines = message.text.split('\n', 1)
     if len(lines) < 2 or not lines[1].strip():
         bot.reply_to(message, "Ошибка: неверный формат сообщения")
@@ -1059,10 +999,9 @@ def setting_command(message):
     if caller_rank not in ["****", "#"]:
         bot.reply_to(message, "Ошибка: недостаточно прав")
         return
-    show_settings_main(message.chat.id, chat_id, message.message_id + 1)  # ответим новым сообщением
-    # На самом деле reply не используем, чтобы не путаться с кнопками, отправим новое
+    show_settings_main(message.chat.id, chat_id)
 
-def show_settings_main(chat_id, data_chat_id, reply_to=None):
+def show_settings_main(chat_id, data_chat_id):
     settings = chats.get(data_chat_id, {}).get("settings", get_default_settings())
     list_word_access = settings.get("list_word_access", "***")
     search_mode = "подстрока" if settings.get("search_mode") == "substring" else "точное совпадение"
@@ -1073,7 +1012,6 @@ def show_settings_main(chat_id, data_chat_id, reply_to=None):
 
     text = "**Настройки чата**"
     keyboard = types.InlineKeyboardMarkup(row_width=2)
-    # Ряд 1: list_word и search_mode
     btn_list = types.InlineKeyboardButton(
         f"Доступ /list_word {'$' if list_word_access == '$' else '***'}",
         callback_data=f"set_toggle_listword|{data_chat_id}"
@@ -1083,13 +1021,11 @@ def show_settings_main(chat_id, data_chat_id, reply_to=None):
         callback_data=f"set_toggle_search|{data_chat_id}"
     )
     keyboard.add(btn_list, btn_search)
-    # Ряд 2: анонимный режим
     btn_anon = types.InlineKeyboardButton(
         f"Анонимный режим: {anon}",
         callback_data=f"set_toggle_anon|{data_chat_id}"
     )
     keyboard.add(btn_anon)
-    # Ряд 3: права up/down и часовой пояс
     btn_rights = types.InlineKeyboardButton(
         "Права /up и /down",
         callback_data=f"set_rights_menu|{data_chat_id}"
@@ -1099,7 +1035,6 @@ def show_settings_main(chat_id, data_chat_id, reply_to=None):
         callback_data=f"set_tz_menu|{data_chat_id}"
     )
     keyboard.add(btn_rights, btn_tz)
-    # Ряд 4: режим фильтра
     btn_filter = types.InlineKeyboardButton(
         "Режим фильтра",
         callback_data=f"set_filter_menu|{data_chat_id}"
@@ -1113,7 +1048,6 @@ def setting_callback(call):
     data = call.data.split("|")
     action = data[0]
     chat_id = data[1]
-    # Проверка прав
     caller_rank = get_user_rank(chat_id, str(call.from_user.id))
     if caller_rank not in ["****", "#"]:
         bot.answer_callback_query(call.id, text="Недостаточно прав", show_alert=True)
@@ -1126,7 +1060,7 @@ def setting_callback(call):
         settings["list_word_access"] = new_val
         save_data(chats)
         bot.answer_callback_query(call.id, text=f"Режим Доступ /list_word {'для всех' if new_val == '$' else 'ограничен'} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_toggle_search":
         current = settings.get("search_mode", "substring")
@@ -1134,7 +1068,7 @@ def setting_callback(call):
         settings["search_mode"] = new_val
         save_data(chats)
         bot.answer_callback_query(call.id, text=f"Режим Фильтр: {'подстрока' if new_val == 'substring' else 'точное совпадение'} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_toggle_anon":
         current = settings.get("anonymous", "off")
@@ -1142,10 +1076,9 @@ def setting_callback(call):
         settings["anonymous"] = new_val
         save_data(chats)
         bot.answer_callback_query(call.id, text=f"Режим Анонимный режим {'вкл' if new_val == 'on' else 'выкл'} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_rights_menu":
-        # Подменю выбора варианта прав
         variant = int(settings.get("updown_rights", "1"))
         keyboard = types.InlineKeyboardMarkup(row_width=2)
         btns = []
@@ -1164,7 +1097,7 @@ def setting_callback(call):
         settings["updown_rights"] = str(variant)
         save_data(chats)
         bot.answer_callback_query(call.id, text=f"Режим Вариант {variant} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_tz_menu":
         current_tz = settings.get("timezone", "+3")
@@ -1172,7 +1105,7 @@ def setting_callback(call):
         btns = []
         for tz in UTC_OFFSETS:
             label = f"UTC{tz}"
-            if tz == current_tz.replace("UTC", "").replace("+", ""):  # грубо
+            if tz == current_tz.replace("UTC", "").replace("+", ""):
                 label = "🔴 " + label
             btns.append(types.InlineKeyboardButton(label, callback_data=f"set_tz_set|{chat_id}|{tz}"))
         keyboard.add(*btns)
@@ -1185,7 +1118,7 @@ def setting_callback(call):
         settings["timezone"] = f"+{tz}" if not tz.startswith('-') else tz
         save_data(chats)
         bot.answer_callback_query(call.id, text=f"Режим Часовой пояс UTC{tz} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_filter_menu":
         current_filter = settings.get("filter_mode", "off")
@@ -1211,10 +1144,10 @@ def setting_callback(call):
         save_data(chats)
         filter_text = {"off": "Off", "del_warn": "Del & Warn", "only_del": "Only Del", "only_warn": "Only Warn"}[f_val]
         bot.answer_callback_query(call.id, text=f"Режим {filter_text} установлен")
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
     elif action == "set_back":
-        show_settings_main(call.message.chat.id, chat_id, call.message.message_id)
+        show_settings_main(call.message.chat.id, chat_id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id)
 
@@ -1234,7 +1167,7 @@ def menu_command(message):
     if not common_chats:
         bot.send_message(message.chat.id, "Нет общих чатов")
         return
-    common_chats.sort(key=lambda x: x[1].lower())  # по алфавиту
+    common_chats.sort(key=lambda x: x[1].lower())
     keyboard = types.InlineKeyboardMarkup()
     for cid, ctitle in common_chats:
         keyboard.add(types.InlineKeyboardButton(ctitle, callback_data=f"menu_chat|{cid}"))
@@ -1243,7 +1176,6 @@ def menu_command(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("menu_chat"))
 def menu_chat_callback(call):
     chat_id = call.data.split("|")[1]
-    # Показать действия
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         types.InlineKeyboardButton("My Stats", callback_data=f"menu_action|{chat_id}|mystats"),
@@ -1253,18 +1185,11 @@ def menu_chat_callback(call):
         types.InlineKeyboardButton("Ranks", callback_data=f"menu_action|{chat_id}|ranks"),
         types.InlineKeyboardButton("List Word", callback_data=f"menu_action|{chat_id}|listword")
     )
-    keyboard.add(types.InlineKeyboardButton("← Назад", callback_data=f"menu_back"))
-    # Проверим, доступен ли list_word
+    keyboard.add(types.InlineKeyboardButton("← Назад", callback_data="menu_back"))
     settings = chats.get(chat_id, {}).get("settings", get_default_settings())
     access = settings.get("list_word_access", "***")
     user_rank = get_user_rank(chat_id, str(call.from_user.id))
-    if access == "$" or RANK_ORDER.index(user_rank) >= RANK_ORDER.index("***"):
-        # Можно
-        pass
-    else:
-        # Меняем кнопку List Word на красную и делаем callback с ошибкой
-        # Для простоты оставим ту же кнопку, но при нажатии проверим внутри
-        # На самом деле проще пересоздать клавиатуру с учётом прав
+    if not (access == "$" or RANK_ORDER.index(user_rank) >= RANK_ORDER.index("***")):
         keyboard = types.InlineKeyboardMarkup(row_width=2)
         keyboard.add(
             types.InlineKeyboardButton("My Stats", callback_data=f"menu_action|{chat_id}|mystats"),
@@ -1274,7 +1199,7 @@ def menu_chat_callback(call):
             types.InlineKeyboardButton("Ranks", callback_data=f"menu_action|{chat_id}|ranks"),
             types.InlineKeyboardButton("🔴 List Word", callback_data=f"menu_action_denied|{chat_id}")
         )
-        keyboard.add(types.InlineKeyboardButton("← Назад", callback_data=f"menu_back"))
+        keyboard.add(types.InlineKeyboardButton("← Назад", callback_data="menu_back"))
     bot.edit_message_text("Выберите действие:", chat_id=call.message.chat.id, message_id=call.message.message_id,
                           reply_markup=keyboard)
     bot.answer_callback_query(call.id)
@@ -1287,7 +1212,6 @@ def menu_action_denied(call):
 def menu_action_callback(call):
     _, chat_id, action = call.data.split("|")
     if action == "mystats":
-        # Показываем свою статистику
         user_id = str(call.from_user.id)
         user_data = chats.get(chat_id, {}).get("users", {}).get(user_id, {})
         if not user_data:
@@ -1295,7 +1219,6 @@ def menu_action_callback(call):
         rank = user_data.get("rank", "$")
         warns = user_data.get("warns", 0)
         blocked_until = user_data.get("blocked_until")
-        # Форматирование (аналогично /user)
         lines = [f"**Статистика пользователя @{call.from_user.username or call.from_user.first_name}**"]
         lines.append(f"• Ранг: {RANKS.get(rank, 'участник')}")
         if warns > 0:
@@ -1310,7 +1233,6 @@ def menu_action_callback(call):
             lines.append(f"• Заблокирован до {time_str}")
         else:
             lines.append("• Блокировки отсутствуют")
-        # Сообщения
         msg_total = user_data.get("msg_total", 0)
         msg_30d = user_data.get("msg_last_30d", 0)
         msg_7d = user_data.get("msg_last_7d", 0)
@@ -1322,11 +1244,9 @@ def menu_action_callback(call):
             lines.append(f"• Сообщений за последние 7 дней: {msg_7d}")
         bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="Markdown")
     elif action == "chat":
-        # Аналогично /chat но отправим в ЛС
         chat_data = chats.get(chat_id, {})
         users = chat_data.get("users", {})
         settings = chat_data.get("settings", get_default_settings())
-        # заполняем статистику
         total_msgs = sum(u.get("msg_total", 0) for u in users.values())
         msgs_30d = sum(u.get("msg_last_30d", 0) for u in users.values())
         msgs_7d = sum(u.get("msg_last_7d", 0) for u in users.values())
@@ -1359,7 +1279,6 @@ def menu_action_callback(call):
         ]
         bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="Markdown")
     elif action == "ranks":
-        # аналог /ranks
         rank_lists = {"*": [], "**": [], "***": [], "****": [], "#": []}
         for uid, data in chats.get(chat_id, {}).get("users", {}).items():
             rank = data.get("rank", "$")
@@ -1385,7 +1304,6 @@ def menu_action_callback(call):
             lines.append(f"• {rank_names[rank_key]}: {names}")
         bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="Markdown")
     elif action == "listword":
-        # Пагинация неудобна, выведем первую страницу или можно без кнопок для ЛС
         words = chats.get(chat_id, {}).get("words", [])
         text = "**Чёрный список слов**\n" + "\n".join(f"• {w}" for w in words) if words else "Список пуст"
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
@@ -1393,7 +1311,6 @@ def menu_action_callback(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu_back")
 def menu_back_callback(call):
-    # Возвращаемся к списку чатов
     user_id = call.from_user.id
     common_chats = []
     for chat_id_str, chat_data in chats.items():
@@ -1438,7 +1355,7 @@ def anonim_command(message):
     keyboard = types.InlineKeyboardMarkup()
     for cid, ctitle, anon in common_chats:
         if anon == "on":
-            keyboard.add(types.InlineKeyboardButton(ctitle, callback_data=f"anon_confirm|{cid}|{text[:50]}"))  # ограничим длину
+            keyboard.add(types.InlineKeyboardButton(ctitle, callback_data=f"anon_confirm|{cid}|{text[:50]}"))
         else:
             keyboard.add(types.InlineKeyboardButton(f"🔴 {ctitle}", callback_data=f"anon_denied|{ctitle}"))
     bot.send_message(message.chat.id, "Выберите чат для анонимного сообщения:", reply_markup=keyboard)
@@ -1451,17 +1368,11 @@ def anon_denied(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("anon_confirm"))
 def anon_confirm_callback(call):
     _, chat_id, text_preview = call.data.split("|")
-    # Ищем полный текст из сообщения? Мы сохранили только первые 50 символов. Лучше хранить временно.
-    # Для упрощения: текст передаётся в callback_data? Может быть длинный, но максимум 64 байта.
-    # Обходной путь: сохранять в словарь. Но для MVP допустим, что текст короткий.
-    # Отправим подтверждение
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(
         types.InlineKeyboardButton("Да", callback_data=f"anon_send|{chat_id}|{call.message.reply_to_message.text.split(maxsplit=1)[1][:100]}"),
         types.InlineKeyboardButton("Отмена", callback_data="anon_cancel")
     )
-    # На самом деле нужно получить исходный текст. В реальном коде лучше использовать состояние.
-    # Пока используем упрощённый механизм: текст берём из исходного сообщения, которое reply
     bot.edit_message_text(
         f"**Вы действительно хотите отправить в чат анонимное сообщение**\n> {call.message.reply_to_message.text.split(maxsplit=1)[1]}",
         chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown", reply_markup=keyboard)
@@ -1470,37 +1381,30 @@ def anon_confirm_callback(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("anon_send"))
 def anon_send(call):
     _, chat_id, text = call.data.split("|", 2)
-    # Отправляем в чат
     bot.send_message(int(chat_id), f"**Новое анонимное сообщение**\n{text}", parse_mode="Markdown")
     bot.edit_message_text("Сообщение отправлено", chat_id=call.message.chat.id, message_id=call.message.message_id)
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "anon_cancel")
 def anon_cancel(call):
-    # Вернуться к списку чатов
     bot.edit_message_text("Отправка отменена", chat_id=call.message.chat.id, message_id=call.message.message_id)
     bot.answer_callback_query(call.id)
 
 # ---------- ФИЛЬТР СООБЩЕНИЙ И СЧЁТЧИКИ ----------
 @bot.message_handler(func=lambda message: True, content_types=['text', 'photo', 'video', 'document', 'audio', 'sticker', 'voice', 'contact', 'location', 'venue'])
 def message_counter_and_filter(message):
-    # Игнорируем личные сообщения (уже обработаны командами)
     if message.chat.type not in ["group", "supergroup"]:
         return
     chat_id = get_chat_id(message)
     user_id = str(message.from_user.id)
 
-    # Проверка прав бота (при каждом сообщении)
     if not check_bot_rights(chat_id, message):
         return
 
-    # Обновляем создателя (если сменился владелец)
     update_creator(chat_id)
 
-    # Инициализация данных чата, если надо
     chat_data = chats.setdefault(chat_id, {"settings": get_default_settings(), "words": [], "users": {}, "init": False})
     if not chat_data.get("init"):
-        # При первой активности в чате отправляем приветствие
         chat_data["init"] = True
         save_data(chats)
         bot.send_message(chat_id,
@@ -1509,20 +1413,16 @@ def message_counter_and_filter(message):
             "Для настройки чата используйте /setting\n"
             "Используйте /up чтобы назначить админов",
             parse_mode="Markdown")
-        return  # Пропускаем фильтр для первого сообщения? Нет, просто инициализируем и идём дальше
+        return
 
-    # Увеличиваем счётчики сообщений пользователя
     user_data = chat_data["users"].setdefault(user_id, {"rank": "$", "warns": 0, "blocked_until": None, "msg_total": 0, "msg_last_30d": 0, "msg_last_7d": 0, "last_msg_date": ""})
     user_data["msg_total"] = user_data.get("msg_total", 0) + 1
-    # Обновление окон за 30 и 7 дней
     now = datetime.utcnow()
     last_date_str = user_data.get("last_msg_date", "")
     if last_date_str:
         last_date = datetime.strptime(last_date_str, "%Y-%m-%d")
-        # Если прошло больше 30 дней, сбрасываем 30-дневный счётчик
         if (now - last_date).days >= 30:
             user_data["msg_last_30d"] = 0
-        # Если прошло больше 7 дней, сбрасываем 7-дневный
         if (now - last_date).days >= 7:
             user_data["msg_last_7d"] = 0
     user_data["msg_last_30d"] = user_data.get("msg_last_30d", 0) + 1
@@ -1530,7 +1430,6 @@ def message_counter_and_filter(message):
     user_data["last_msg_date"] = now.strftime("%Y-%m-%d")
     save_data(chats)
 
-    # Фильтр слов (только для текстовых сообщений)
     settings = chat_data.get("settings", get_default_settings())
     filter_mode = settings.get("filter_mode", "off")
     if filter_mode == "off" or not message.text:
@@ -1549,7 +1448,7 @@ def message_counter_and_filter(message):
             if re.search(pattern, text_to_check):
                 found = True
                 break
-        else:  # exact
+        else:
             pattern = r'\b' + build_pattern(word) + r'\b'
             if re.search(pattern, text_to_check):
                 found = True
@@ -1558,25 +1457,22 @@ def message_counter_and_filter(message):
     if not found:
         return
 
-    # Применяем санкции
-    # Удаление
     if filter_mode in ("only_del", "del_warn"):
         try:
             bot.delete_message(chat_id, message.message_id)
         except:
             pass
 
-    # Варн
     if filter_mode in ("only_warn", "del_warn"):
         user_data["warns"] = user_data.get("warns", 0) + 1
         save_data(chats)
-        # Уведомление в чат? Не требуется, просто счётчик увеличивается
-        # Можно уведомить модераторов, но не будем усложнять
 
-    # Если комбинированный режим, сообщение уже удалено, варн выдан
-
-# ---------- ЗАПУСК БОТА ----------
-if __name__ == "__main__":
+# ---------- ЗАПУСК ----------
+def run_polling():
     print("Бот запущен...")
-    # Проверяем, что все чаты инициализированы (при необходимости)
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+if __name__ == "__main__":
+    threading.Thread(target=run_polling, daemon=True).start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
