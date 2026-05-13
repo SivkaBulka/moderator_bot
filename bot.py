@@ -285,7 +285,7 @@ def help_callback(call):
 
     if call.data == "help_expand":
         text = (
-            "**Список команд**\n"
+            "Список команд\n"
             "/help список команд $\n"
             "/user [ник] информация о пользователе $\n"
             "/chat информация о чате $\n"
