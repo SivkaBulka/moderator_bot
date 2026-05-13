@@ -3,6 +3,7 @@ import re
 import os
 import time
 import threading
+from telebot.util import escape_markdown
 from datetime import datetime, timedelta
 import telebot
 from telebot import types
