@@ -901,7 +901,7 @@ def list_word_callback(call):
             keyboard.add(types.InlineKeyboardButton("<", callback_data=f"listword_{chat_id}_{page - 1}"),
                          types.InlineKeyboardButton(">", callback_data=f"listword_{chat_id}_{page + 1}"))
     bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id,
-                          parse_mode="Markdown", reply_markup=keyboard)
+                          parse_mode="None", reply_markup=keyboard)
     bot.answer_callback_query(call.id)
 
 @bot.message_handler(commands=['add_word'])
