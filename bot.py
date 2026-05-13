@@ -249,7 +249,7 @@ def help_command(message):
     list_word_icon = settings.get("list_word_access", "***")
 
     short_text = (
-        "**Список команд**\n"
+        "Список команд\n"
         "/help список команд\n"
         "/user информация о пользователе\n"
         "/chat информация о чате\n"
