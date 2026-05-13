@@ -236,7 +236,7 @@ def start_private(message):
     bot.send_message(message.chat.id,
         "**Бот готов к работе!**\n"
         "Здесь вы можете использовать команды /menu и /anonim",
-        parse_mode="Markdown")
+        parse_mode="None")
 
 @bot.message_handler(commands=['help'])
 @require_group
@@ -306,10 +306,10 @@ def help_callback(call):
         keyboard = types.InlineKeyboardMarkup()
         keyboard.add(types.InlineKeyboardButton("Сокращённый список", callback_data="help_collapse"))
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id,
-                              parse_mode="Markdown", reply_markup=keyboard)
+                              parse_mode="None", reply_markup=keyboard)
     elif call.data == "help_collapse":
         short_text = (
-            "**Список команд**\n"
+            "Список команд\n"
             "/help список команд\n"
             "/user информация о пользователе\n"
             "/chat информация о чате\n"
@@ -329,7 +329,7 @@ def help_callback(call):
         keyboard = types.InlineKeyboardMarkup()
         keyboard.add(types.InlineKeyboardButton("Расширенный список", callback_data="help_expand"))
         bot.edit_message_text(short_text, chat_id=call.message.chat.id, message_id=call.message.message_id,
-                              parse_mode="Markdown", reply_markup=keyboard)
+                              parse_mode="None", reply_markup=keyboard)
     bot.answer_callback_query(call.id)
 
 # ---------- КОМАНДЫ /user, /chat, /ranks ----------
